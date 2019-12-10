@@ -357,7 +357,7 @@ export default class DetailsComponent extends React.PureComponent<Props, State> 
                 <Col>
                     <Text strong className='cvat-black-color'>Issue Tracker</Text>
                     <br />
-                    <Text editable={{ onChange: onChangeValue }}>Not specified</Text>
+                    <Text editable={{ onChange: onChangeValue }} />
                 </Col>
             </Row>
         );
