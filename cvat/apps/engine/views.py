@@ -49,6 +49,9 @@ from cvat.apps.annotation.models import AnnotationDumper, AnnotationLoader
 from cvat.apps.annotation.format import get_annotation_formats
 import cvat.apps.dataset_manager.task as DatumaroTask
 
+import tarfile
+from django.http import HttpResponse
+
 # Server REST API
 @login_required
 def dispatch_request(request):
@@ -460,6 +463,60 @@ class TaskViewSet(auth.TaskGetQuerySetMixin, viewsets.ModelViewSet):
             slogger.task[pk].error(
                 "cannot get frame #{}".format(frame), exc_info=True)
             return HttpResponseBadRequest(str(e))
+
+
+    @staticmethod
+    @action(detail=True, methods=['GET'], serializer_class=None,
+        url_path='frames_packet/(?P<frame_start>\d+)/(?P<frame_stop>\d+)')
+    def frame_packet(request, pk, frame_start, frame_stop):
+        """Get a frame for the task"""
+
+        try:
+            # Follow symbol links if the frame is a link on a real image otherwise
+            # mimetype detection inside sendfile will work incorrectly.
+
+            db_task = Task.objects.filter(pk=pk).only("id").first()
+
+            task_dirname = os.path.join(settings.DATA_ROOT, str(db_task.id))
+
+            data_dirname = os.path.join(task_dirname, "data")
+
+            frame_start = int(frame_start)
+            frame_stop = int(frame_stop)
+
+            if frame_start > frame_stop:
+                frame_start, frame_stop = frame_stop, frame_start
+
+            if frame_stop - frame_start > 500:
+               frame_stop = frame_start + 25
+
+            response = HttpResponse(content_type='application/tar')
+            response['Content-Disposition'] = 'attachment; filename=packet.tar'
+            tarred = tarfile.open(fileobj=response, mode='x')
+
+            for frame in range(frame_start, frame_stop+1):
+
+                d1 = str(int(frame) // 10000)
+                d2 = str(int(frame) // 100)
+
+                path = os.path.join(data_dirname, d1, d2, str(frame) + '.jpg')
+
+                path = os.path.realpath(path)
+
+                tarred.add(path, arcname=str(frame)+'.jpg')
+                #tarred.addfile(tarfile.TarInfo(str(frame)+'.jpg'), open(path))
+
+#            return sendfile(request, path)
+
+            tarred.close()
+
+            return response
+
+        except Exception as e:
+            slogger.task[pk].error(
+                "cannot get frames_packet #{}-{}".format(frame_start, frame_stop), exc_info=True)
+            return HttpResponseBadRequest(str(e))
+
 
     @action(detail=True, methods=['GET'], serializer_class=None,
         url_path='dataset')

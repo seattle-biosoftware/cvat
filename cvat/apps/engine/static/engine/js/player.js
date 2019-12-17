@@ -16,117 +16,328 @@
 
 'use strict';
 
+let SETTINGS_FPS = null;
+
 class FrameProvider extends Listener {
     constructor(stop, tid) {
+        /**	
+         * On "_loaded" property change - triggers 'onFrameLoad' event	
+         */
         super('onFrameLoad', () => this._loaded);
-        this._MAX_LOAD = 500;
 
-        this._stack = [];
-        this._loadInterval = null;
+        /**	
+         * Crnt frame which was not loaded	
+         * @type {Number}	
+         */
         this._required = null;
+
+        /**	
+         * Triggers 'onFrameLoad' event on this property change	
+         * @type {Number}	
+         */
         this._loaded = null;
-        this._loadAllowed = true;
-        this._preloadRunned = false;
-        this._loadCounter = this._MAX_LOAD;
+
+        /**	
+         * Store frame collection	
+         * @type {Object}	
+         */
         this._frameCollection = {};
+
+        /**	
+         * All frames count of video	
+         * @type {Number}	
+         */
         this._stop = stop;
+
+        /**	
+         * Task id	
+         * @type {Number}	
+         */
         this._tid = tid;
+
+        /**	
+         * How many frames include one packet (tar file of frames)	
+         * @type {Number}	
+         */	
+        this._loadFramesInPacket = 25;	
+
+        /**	
+         * Disable if frame loading is valid	
+         * @type {Boolean}	
+         */	
+        this._loadFramesInPacketAllowed = true;	
+
+        /**	
+         * Frames are loading	
+         * @type {Boolean}	
+         */	
+        this._framesAreLoading = false;	
+
+        /**	
+         * Array of loaded frames (frame idxes)	
+         * @type {Array<Number>}	
+         */	
+        this._loadedFrames = [];	
+
+        /**	
+         * HTML element of progress bar	
+         * Displays downloaded frames from server	
+         * @type {HTMLElement}	
+         */	
+        this._preloadedProgressUI = $("#preloadedProgressBar");	
+
+        /**	
+         * HTML element of player progress	
+         * @type {HTMLElement}	
+         */	
+        this.playerProgressUI = $("#playerProgress");
+
+        /**	
+         * Detect loading of first frame	
+         * @type {Boolean}	
+         */	
+        this._firstLoading = true;	
+
+        /**	
+         * Save passed of last frame if we started load frames by required frame	
+         * @type {Array<Number>}	
+         */	
+        this._passedFrameIdx = [];
+
+        /**	
+         * Loading past frames	
+         * @type {Boolean}	
+         */	
+        this._loadingPastFrames = false;
+
+        /**	
+         * Loading bar has drawn	
+         * @type {Boolean}	
+         */	
+        this._loadingBarDrawn = false;
+
+        /**	
+         * Set delay of frames loading	
+         * @type {function}	
+         */	
+        this._timeoutLoading = null;
+
+        /**	
+         * Max length of saved frames in object	
+         * @type {Number}	
+         */	
+        this._MAX_FRAMES_LENGTH = 15000;
+
+        /**	
+         * Disable previous frames loading	
+         * @type {Boolean}	
+         */	
+        this._disablePreviuosLoading = false;
     }
 
+    /**	
+     * Return crnt frame image if it exists in collection. If not - call method to load it	
+     * @param {Number} frame 	
+     * @returns {Image} image	
+     */
     require(frame) {
         if (frame in this._frameCollection) {
-            this._preload(frame);
+
             return this._frameCollection[frame];
         }
+        // If frame is selected and not loaded - load it
         this._required = frame;
-        this._loadCounter = this._MAX_LOAD;
-        this._load();
+        this._loadFramesInPacketAllowed = true;	
+        this._disablePreviuosLoading = true;	
+        this._load(true);
         return null;
     }
 
+    /**	
+     * Method trigger after image loading	
+     * Returns true/false if image loading in collection is success	
+     * @param {Image} image 	
+     * @param {Number} frame 	
+     * @returns {Boolean}	
+     */
     _onImageLoad(image, frame) {
-        const next = frame + 1;
-        if (next <= this._stop && this._loadCounter > 0) {
-            this._stack.push(next);
-        }
-        this._loadCounter--;
-        this._loaded = frame;
-        this._frameCollection[frame] = image;
-        this._loadAllowed = true;
-        image.onload = null;
-        image.onerror = null;
-        this.notify();
-    }
+	    // Player has limit of loaded frames. If limit was broken, we remove first loaded frame	
+        if (this._loadedFrames.length >= this._MAX_FRAMES_LENGTH) {	
+            if (window.cvat.player.frames.current !== this._loadedFrames[0]) {	
+                this._loaded = frame;	
+                this._frameCollection[frame] = image;	
+                this._loadedFrames.push(frame);
 
-    _preload(frame) {
-        if (this._preloadRunned) {
-            return;
-        }
+                this._loadedFrames.splice(0, 1);	
+                delete this._frameCollection[this._loadedFrames[0]];	
 
-        const last = Math.min(this._stop, frame + Math.ceil(this._MAX_LOAD / 2));
-        if (!(last in this._frameCollection)) {
-            for (let idx = frame + 1; idx <= last; idx++) {
-                if (!(idx in this._frameCollection)) {
-                    this._loadCounter = this._MAX_LOAD - (idx - frame);
-                    this._stack.push(idx);
-                    this._preloadRunned = true;
-                    this._load();
-                    return;
-                }
-            }
+                this.notify();	
+                return true;	
+            } else {	
+                this.notify();	
+                return false;	
+            }	
+        } else {	
+            this._loaded = frame;	
+            this._frameCollection[frame] = image;	
+            this._loadedFrames.push(frame);	
+            this.notify();	
+            return true;
         }
     }
 
-    _load() {
-        if (!this._loadInterval) {
-            this._loadInterval = setInterval(() => {
-                if (!this._loadAllowed) {
-                    return;
-                }
+	/**	
+     * Get start/end frames to load them. If we have 'required' frames to load, we need to stop prev frames loading execution	
+     * @param {Boolean} allowLoading	
+     */	
+    _load(allowLoading = false) {	
+        clearTimeout(this._timeoutLoading);	
+        let self = this;	
+        this._timeoutLoading = setTimeout(() => {	
+            if (self._disablePreviuosLoading) {	
+                if (!allowLoading) return;	
+            }	
+            if (!self._loadFramesInPacketAllowed) return;	
+            // Next loading is valid after packet parsing	
+            self._loadFramesInPacketAllowed = false;
 
-                if (this._loadCounter <= 0) {
-                    this._stack = [];
-                }
+            // Set frame range to get from packet	
+            let startFrame;	
+            if (self._firstLoading) {	
+                startFrame = 0;	
+                self._firstLoading = false;	
+            } else if (self._required !== null && self._required !== undefined && self._required !== 0) {	
+                startFrame = self._required;	
+                self._required = null;	
+            } else {	
+                startFrame = self._loadedFrames[self._loadedFrames.length - 1] + 1;	
+            }	
+            let endFrame = startFrame + self._loadFramesInPacket - 1;	
+            if (endFrame >= this._stop) endFrame = this._stop;	
 
-                if (!this._stack.length && this._required == null) {
-                    clearInterval(this._loadInterval);
-                    this._preloadRunned = false;
-                    this._loadInterval = null;
-                    return;
-                }
+            if (Object.keys(this._frameCollection).length >= this._stop) {	
+                self._updatePreLoadedProgressBar(this._stop);	
+                return;	
+            }	
 
-                if (this._required != null) {
-                    this._stack.push(this._required);
-                    this._required = null;
-                }
+            this._loadFramesInPacketAPI(startFrame, endFrame);	
+        }, 300);	
+    }	
+    /**	
+     * Load frames in packet (.tar)	
+     * @param {Number} startFrame 	
+     * @param {Number} endFrame 	
+     */	
+    _loadFramesInPacketAPI(startFrame, endFrame) {	
+        // Open and create HTTP request	
+        const xhr = new XMLHttpRequest();	
+        xhr.responseType = 'blob';	
 
-                const frame = this._stack.pop();
-                if (frame in this._frameCollection) {
-                    this._loadCounter--;
-                    const next = frame + 1;
-                    if (next <= this._stop && this._loadCounter > 0) {
-                        this._stack.push(frame + 1);
-                    }
-                    return;
-                }
+        let startTime = null;	
+        let endTime = null;	
+        startTime = new Date().getTime();
 
-                // If load up to last frame, no need to load previous frames from stack
-                if (frame === this._stop) {
-                    this._stack = [];
-                }
+        xhr.open('GET', `/api/v1/tasks/${this._tid}/frames_packet/${startFrame}/${endFrame}`, true);
+        xhr.send();	
 
-                this._loadAllowed = false;
-                const image = new Image();
-                image.onload = this._onImageLoad.bind(this, image, frame);
-                image.onerror = () => {
-                    this._loadAllowed = true;
-                    image.onload = null;
-                    image.onerror = null;
-                };
-                image.src = `/api/v1/tasks/${this._tid}/frames/${frame}`;
-            }, 25);
-        }
+        let self = this;	
+        xhr.onreadystatechange = function () {	
+            if (xhr.readyState == XMLHttpRequest.DONE && xhr.status == 200) {	
+                // Detect client/server delay	
+                endTime = new Date().getTime();	
+                self._detectFPSByPacketDelay(startTime, endTime, self._loadFramesInPacket);	
+
+                if (self._disablePreviuosLoading) {	
+                    self._disablePreviuosLoading = false;	
+                }	
+
+                new Response(xhr.response).arrayBuffer()	
+                    .then(data => {	
+                        untar(data)	
+                            .then(function (extractedFiles) {	
+                                for (let i = 0; i < extractedFiles.length; i++) {	
+                                    const image = new Image();	
+                                    image.src = extractedFiles[i].getBlobUrl();
+
+                                    image.onload = () => {	
+                                        if (self._disablePreviuosLoading) {	
+                                            return;	
+                                        }
+
+                                        let frameIdx = startFrame + i;	
+                                        // if (self._loadedFrames.indexOf(frameIdx) !== -1) return;	
+
+                                        if (self._onImageLoad(image, frameIdx)) {	
+                                            self._updatePreLoadedProgressBar(frameIdx);	
+                                        }
+
+                                        // self._loadFramesInPacketAllowed = false;	
+
+
+                                        // If all frames in packet are loaded - start frame reloading process from next unloaded frame idx	
+                                        if (i === self._loadFramesInPacket - 1 && !self._disablePreviuosLoading) {	
+                                            self._loadFramesInPacketAllowed = true;	
+                                            self._load();	
+
+                                            image.onload = null;	
+                                            image.onerror = null;	
+                                        }	
+                                    }	
+                                    image.onerror = () => {	
+                                        image.onload = null;	
+                                        image.onerror = null;	
+                                    };	
+                                }	
+                            });	
+                    })	
+            }	
+        };	
     }
+
+    /**	
+     * Detect FPS which depends on download speed of packet of frames	
+     * @param {Number} startTime 	
+     * @param {Number} endTime 	
+     * @param {Number} loadedFrames. Loaded frames by packet	
+     */	
+    _detectFPSByPacketDelay(startTime = 0, endTime = 0, loadedFrames = 0) {	
+        if (endTime === null && startTime === null) return;	
+        const delay = (endTime - startTime + 450) / loadedFrames; // Delay per 1 frame	
+        let fps = 800 / delay;	
+        if (fps > 25) fps = 25;	
+        if (fps < 1) fps = 1;	
+        SETTINGS_FPS = Math.floor(fps);	
+    }
+
+    /**	
+     * FPS will be depends on ping (1 frame downloading time)	
+     * This method dynamically changes FPS	
+     * @param {Number} startTime 	
+     * @param {Number} endTime 	
+     */	
+    _FPSChangeByPing(startTime = 0, endTime = 0) {	
+        if (endTime === null && startTime === null) return;	
+        const delay = endTime - startTime;	
+        // Get FPS value dividing 1000ms (800ms considering relative error)	
+        let fps = 800 / delay;	
+        if (fps > 25) fps = 25;	
+        if (fps < 1) fps = 1;	
+        SETTINGS_FPS = Math.round(fps);	
+    }
+
+    /**	
+     * Update progress bar of loaded frames	
+     * Method calls after frame loading from server	
+     * @type {Number} frameIdx	
+     */	
+    _updatePreLoadedProgressBar(frameIdx) {	
+        if (frameIdx === undefined || frameIdx === null) return;
+
+        const barWidthPx = parseFloat(this.playerProgressUI.width()) / (this._stop + 1);	
+        const barWidthPercent = barWidthPx / parseFloat(this.playerProgressUI.width()) * 100;	
+        const loadedWidthPercent = frameIdx * barWidthPercent;	
+        this._preloadedProgressUI.css("width", `${loadedWidthPercent}%`)	
+    }	
 }
 
 
@@ -171,6 +382,13 @@ class PlayerModel extends Listener {
         this._geometry.frameOffset = Math.floor(frameOffset);
         window.cvat.translate.playerOffset = this._geometry.frameOffset;
         window.cvat.player.rotation = this._geometry.rotation;
+
+        /**	
+         * HTML element of progress bar	
+         * Displays played frames from server	
+         * @type {HTMLElement}	
+         */	
+        this._loadedProgressUI = $("#loadedProgressBar");
 
         this._frameProvider.subscribe(this);
     }
@@ -257,15 +475,17 @@ class PlayerModel extends Listener {
                     } else { // Else update the frame
                         this.shift(0);
                     }
-                }, 5000);
+                }, 500);
             } else { // Just update frame if no need to play
                 this.shift(0);
+                this._updatePlayedProgressBar(this._frame.current)
             }
         }
     }
 
     play() {
         this._pauseFlag = false;
+        let idx = 0;
         this._playInterval = setInterval(() => {
             if (this._pauseFlag) { // pause method without notify (for frame downloading)
                 if (this._playInterval) {
@@ -275,9 +495,50 @@ class PlayerModel extends Listener {
                 return;
             }
 
+            // Set default FPS value if all frames are loaded	
+            if (Object.keys(this._frameProvider._frameCollection).length - 1 === this._frame.stop) {	
+                this._settings.fps = 25;	
+                SETTINGS_FPS = 25;	
+                clearInterval(this._playInterval);	
+                this._playInterval = null;	
+                this.play();	
+            }
+
+            // Set default FPS value if storage of loaded frames are more than 75 frames	
+            if ((this._frame.current + 75) in this._frameProvider._frameCollection) {	
+                this._settings.fps = 25;	
+                // SETTINGS_FPS = 25;	
+                clearInterval(this._playInterval);	
+                this._playInterval = null;	
+                this.play();	
+            }
+
+            // Change video FPS every 2 frame	
+            if (idx > 2) {	
+                clearInterval(this._playInterval);	
+                this._playInterval = null;	
+                this.play();	
+            }	
+            idx++;
+
+            if (SETTINGS_FPS !== null) this._settings.fps = SETTINGS_FPS;
             const skip = Math.max(Math.floor(this._settings.fps / 25), 1);
+            this._updatePlayedProgressBar(this._frame.current);
             if (!this.shift(skip)) this.pause(); // if not changed, pause
         }, 1000 / this._settings.fps);
+    }
+
+    /**	
+     * Update progress bar of prev frames	
+     * Method calls after frame playing	
+     * @type {Number} frameIdx	
+     */	
+    _updatePlayedProgressBar(frameIdx) {	
+        if (frameIdx === undefined || frameIdx === null) return;	
+        const barWidthPx = parseFloat(this._frameProvider.playerProgressUI.width()) / (this._frameProvider._stop + 1);	
+        const barWidthPercent = barWidthPx / parseFloat(this._frameProvider.playerProgressUI.width()) * 100;	
+        const loadedWidthPercent = frameIdx * barWidthPercent;	
+        this._loadedProgressUI.css("width", `${loadedWidthPercent}%`)	
     }
 
     pause() {
@@ -340,7 +601,9 @@ class PlayerModel extends Listener {
         const img = this._frameProvider.require(this._frame.current);
         if (!img) return;
 
-        const { rotation } = this.geometry;
+        const {
+            rotation
+        } = this.geometry;
 
         if ((rotation / 90) % 2) {
             // 90, 270, ..
@@ -509,7 +772,9 @@ class PlayerController {
                 return false;
             });
 
-            const { shortkeys } = window.cvat.config;
+            const {
+                shortkeys
+            } = window.cvat.config;
 
             Mousetrap.bind(shortkeys.next_frame.value, nextHandler, 'keydown');
             Mousetrap.bind(shortkeys.prev_frame.value, prevHandler, 'keydown');
@@ -609,9 +874,12 @@ class PlayerController {
                 this._events.jump = Logger.addContinuedEvent(Logger.EventType.jumpFrame);
             }
 
-            const { frames } = this._model;
+            const {
+                frames
+            } = this._model;
             const progressWidth = e.target.clientWidth;
-            const x = e.clientX + window.pageXOffset - e.target.offsetLeft;
+            // const x = e.clientX + window.pageXOffset - e.target.offsetLeft;
+            const x = e.offsetX + window.pageXOffset - e.target.offsetLeft;
             const percent = x / progressWidth;
             const targetFrame = Math.round((frames.stop - frames.start) * percent);
             this._model.pause();
@@ -746,8 +1014,12 @@ class PlayerView {
         this._playerContentUI.on('mousedown', (e) => {
             const pos = window.cvat.translate.point.clientToCanvas(this._playerBackgroundUI[0],
                 e.clientX, e.clientY);
-            const { frameWidth } = window.cvat.player.geometry;
-            const { frameHeight } = window.cvat.player.geometry;
+            const {
+                frameWidth
+            } = window.cvat.player.geometry;
+            const {
+                frameHeight
+            } = window.cvat.player.geometry;
             if (pos.x >= 0 && pos.y >= 0 && pos.x <= frameWidth && pos.y <= frameHeight) {
                 this._controller.frameMouseDown(e);
             }
@@ -778,7 +1050,9 @@ class PlayerView {
             }
         });
 
-        const { shortkeys } = window.cvat.config;
+        const {
+            shortkeys
+        } = window.cvat.config;
 
         this._clockwiseRotationButtonUI.attr('title', `
             ${shortkeys.clockwise_rotation.view_value} - ${shortkeys.clockwise_rotation.description}`);
@@ -917,9 +1191,15 @@ class PlayerView {
     }
 
     onPlayerUpdate(model) {
-        const { image } = model;
-        const { frames } = model;
-        const { geometry } = model;
+        const {
+            image
+        } = model;
+        const {
+            frames
+        } = model;
+        const {
+            geometry
+        } = model;
 
         if (!image) {
             this._loadingUI.removeClass('hidden');
